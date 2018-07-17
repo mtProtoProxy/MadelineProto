@@ -140,6 +140,7 @@ trait TL
                     $TL_dict['methods'][$key]['id'] = $this->pack_signed_int($TL_dict['methods'][$key]['id']);
                 }
             }
+
             if (empty($TL_dict) || empty($TL_dict['constructors']) || !isset($TL_dict['methods'])) {
                 throw new Exception(\danog\MadelineProto\Lang::$current_lang['src_file_invalid'].$file);
             }
@@ -312,6 +313,9 @@ trait TL
                 if (!is_array($object)) {
                     throw new Exception(\danog\MadelineProto\Lang::$current_lang['array_invalid']);
                 }
+                if (isset($object['_'])) {
+                    throw new Exception('You must provide an array of '.$type['subtype'].' objects, not a '.$type['subtype']." object. Example: [['_' => ".$type['subtype'].', ... ]]');
+                }
                 $concat = $this->constructors->find_by_predicate('vector')['id'];
                 $concat .= $this->pack_unsigned_int(count($object));
                 foreach ($object as $k => $current_object) {
@@ -408,6 +412,9 @@ trait TL
             $arguments = ['peer' => $arguments['peer'], 'message' => $arguments];
             $arguments['message']['_'] = 'decryptedMessage';
             $arguments['message']['ttl'] = 0;
+            if (isset($arguments['message']['reply_to_msg_id'])) {
+                $arguments['message']['reply_to_random_id'] = $arguments['message']['reply_to_msg_id'];
+            }
         }
         if ($method === 'messages.sendEncryptedFile') {
             if (isset($arguments['file'])) {
@@ -466,7 +473,7 @@ trait TL
                     $serialized .= $this->serialize_object(['type' => 'bytes'], $this->random(15 + 4 * (random_int(0, PHP_INT_MAX) % 3)), 'random_bytes');
                     continue;
                 }
-                if ($current_argument['name'] === 'data' && isset($arguments['message'])) {
+                if ($current_argument['name'] === 'data' && isset($tl['method']) && in_array($tl['method'], ['messages.sendEncrypted', 'messages.sendEncryptedFile', 'messages.sendEncryptedService']) && isset($arguments['message'])) {
                     $serialized .= $this->serialize_object($current_argument, $this->encrypt_secret_message($arguments['peer']['chat_id'], $arguments['message']), 'data');
                     continue;
                 }
@@ -495,7 +502,11 @@ trait TL
                     $serialized .= pack('@4');
                     continue;
                 }
-                if ($id = $this->constructors->find_by_predicate(lcfirst($current_argument['type']).'Empty')) {
+                if (in_array($current_argument['type'], ['bytes', 'string', 'Vector t'])) {
+                    $serialized .= pack('@4');
+                    continue;
+                }
+                if ($id = $this->constructors->find_by_predicate(lcfirst($current_argument['type']).'Empty', isset($tl['layer']) ? $tl['layer'] : -1)) {
                     $serialized .= $id['id'];
                     continue;
                 }

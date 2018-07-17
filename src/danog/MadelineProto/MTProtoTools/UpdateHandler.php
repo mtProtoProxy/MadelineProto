@@ -395,6 +395,7 @@ trait UpdateHandler
                 }
                 break;
         }
+
         if ($channel_id === false) {
             $cur_state = &$this->load_update_state();
         } else {
@@ -510,11 +511,15 @@ trait UpdateHandler
 
     public function save_update($update)
     {
-        array_walk($this->calls, function ($controller, $id) {
-            if ($controller->getCallState() === \danog\MadelineProto\VoIP::CALL_STATE_ENDED) {
-                $controller->discard();
-            }
-        });
+        if ($update['_'] === 'updateConfig') {
+            $this->config['expires'] = 0;
+            $this->get_config();
+        }
+        if (in_array($update['_'], ['updateUserName', 'updateUserPhone', 'updateUserBlocked', 'updateUserPhoto', 'updateContactRegistered', 'updateContactLink'])) {
+            $id = $this->get_info($update)['bot_api_id'];
+            $this->full_chats[$id]['last_update'] = 0;
+            $this->get_full_info($id);
+        }
         if ($update['_'] === 'updateDcOptions') {
             $this->logger->logger('Got new dc options', \danog\MadelineProto\Logger::VERBOSE);
             $this->parse_dc_options($update['dc_options']);

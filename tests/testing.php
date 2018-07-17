@@ -45,6 +45,14 @@ echo 'Loading MadelineProto...'.PHP_EOL;
 
 $MadelineProto = new \danog\MadelineProto\API(getcwd().'/testing.madeline', $settings);
 
+try {
+    $MadelineProto->get_self();
+} catch (\danog\MadelineProto\Exception $e) {
+    if ($e->getMessage() === 'TOS action required, check the logs') {
+        $MadelineProto->accept_tos();
+    }
+}
+
 /*
  * If this session is not logged in, login
  */
@@ -239,6 +247,12 @@ $media['document'] = ['_' => 'inputMediaUploadedDocument', 'file' => 'tests/60',
 $message = 'yay';
 $mention = $MadelineProto->get_info(getenv('TEST_USERNAME')); // Returns an array with all of the constructors that can be extracted from a username or an id
 $mention = $mention['user_id']; // Selects only the numeric user id
+
+/*
+$t = time();
+$MadelineProto->upload('big');
+var_dump(time()-$t);
+*/
 
 foreach (json_decode(getenv('TEST_DESTINATION_GROUPS'), true) as $peer) {
     $sentMessage = $MadelineProto->messages->sendMessage(['peer' => $peer, 'message' => $message, 'entities' => [['_' => 'inputMessageEntityMentionName', 'offset' => 0, 'length' => mb_strlen($message), 'user_id' => $mention]]]);

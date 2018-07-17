@@ -39,9 +39,9 @@ trait AuthKeyHandler
                  *
                  * @return ResPQ [
                  *               int128 		$nonce 							: The value of nonce is selected randomly by the server
-                 *               int128 		$server_nonce 					: The value of server_nonce is selected randomly by the server
+                 *               int128 		$server_nonce 						: The value of server_nonce is selected randomly by the server
                  *               string 		$pq 							: This is a representation of a natural number (in binary big endian format). This number is the product of two different odd prime numbers
-                 *               Vector long $server_public_key_fingerprints : This is a list of public RSA key fingerprints
+                 *               Vector long	$server_public_key_fingerprints				: This is a list of public RSA key fingerprints
                  *               ]
                  */
                 $nonce = $this->random(16);
@@ -496,7 +496,6 @@ trait AuthKeyHandler
                 $encrypted_data = $this->random(16).$message_id.pack('VV', $seq_no, strlen($message_data)).$message_data;
                 $message_key = substr(sha1($encrypted_data, true), -16);
                 $padding = $this->random($this->posmod(-strlen($encrypted_data), 16));
-                //$message_key = substr(hash('sha256', substr($this->datacenter->sockets[$datacenter]->auth_key['auth_key'], 88, 32).$encrypted_data.$padding, true), 8, 16);
                 list($aes_key, $aes_iv) = $this->old_aes_calculate($message_key, $this->datacenter->sockets[$datacenter]->auth_key['auth_key']);
                 $encrypted_message = $this->datacenter->sockets[$datacenter]->auth_key['id'].$message_key.$this->ige_encrypt($encrypted_data.$padding, $aes_key, $aes_iv);
                 $res = $this->method_call('auth.bindTempAuthKey', ['perm_auth_key_id' => $perm_auth_key_id, 'nonce' => $nonce, 'expires_at' => $expires_at, 'encrypted_message' => $encrypted_message], ['message_id' => $message_id, 'datacenter' => $datacenter]);
@@ -529,25 +528,31 @@ trait AuthKeyHandler
 
         try {
             foreach ($this->datacenter->sockets as $id => $socket) {
-                $cdn = strpos($id, 'cdn');
-                if (strpos($id, 'media') !== false && !$cdn) {
-                    continue;
-                }
                 if ($socket->session_id === null) {
                     $socket->session_id = $this->random(8);
                     $socket->session_in_seq_no = 0;
                     $socket->session_out_seq_no = 0;
                 }
+                $cdn = strpos($id, 'cdn');
+                $media = strpos($id, 'media');
+
                 if ($socket->temp_auth_key === null || $socket->auth_key === null) {
                     $dc_config_number = isset($this->settings['connection_settings'][$id]) ? $id : 'all';
-                    if ($socket->auth_key === null && !$cdn) {
+                    if ($socket->auth_key === null && !$cdn && !$media) {
                         $this->logger->logger(sprintf(\danog\MadelineProto\Lang::$current_lang['gen_perm_auth_key'], $id), \danog\MadelineProto\Logger::NOTICE);
                         $socket->auth_key = $this->create_auth_key(-1, $id);
                         $socket->authorized = false;
+                    } elseif ($socket->auth_key === null && $media) {
+                        $socket->auth_key = $this->datacenter->sockets[intval($id)]->auth_key;
+                        $socket->authorized = &$this->datacenter->sockets[intval($id)]->authorized;
+                    }
+                    if ($media) {
+                        $socket->authorized = &$this->datacenter->sockets[intval($id)]->authorized;
                     }
                     if ($this->settings['connection_settings'][$dc_config_number]['pfs']) {
                         if (!$cdn) {
                             $this->logger->logger(sprintf(\danog\MadelineProto\Lang::$current_lang['gen_temp_auth_key'], $id), \danog\MadelineProto\Logger::NOTICE);
+                            $socket->temp_auth_key = null;
                             $socket->temp_auth_key = $this->create_auth_key($this->settings['authorization']['default_temp_auth_key_expires_in'], $id);
                             $this->bind_temp_auth_key($this->settings['authorization']['default_temp_auth_key_expires_in'], $id);
                             $config = $this->method_call('help.getConfig', [], ['datacenter' => $id]);
