@@ -110,3 +110,16 @@ phar5
 madeline.phar
 madeline.phar.version
 big
+*.phar
+madeline.php
+.phpunit.result.cache
+.vscode/*
+.vscode
+custom.md
+composer.lock
+phpunit.xml
+vendor
+.php_cs.cache
+coverage
+tempConv
+extracted.json

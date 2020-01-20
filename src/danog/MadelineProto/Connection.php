@@ -1,411 +1,574 @@
 <?php
-
-/*
-Copyright 2016-2018 Daniil Gentili
-(https://daniil.it)
-This file is part of MadelineProto.
-MadelineProto is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
-The PWRTelegram API is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-See the GNU Affero General Public License for more details.
-You should have received a copy of the GNU General Public License along with MadelineProto.
-If not, see <http://www.gnu.org/licenses/>.
-*/
+/**
+ * Connection module.
+ *
+ * This file is part of MadelineProto.
+ * MadelineProto is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+ * MadelineProto is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU Affero General Public License for more details.
+ * You should have received a copy of the GNU General Public License along with MadelineProto.
+ * If not, see <http://www.gnu.org/licenses/>.
+ *
+ * @author    Daniil Gentili <daniil@daniil.it>
+ * @copyright 2016-2019 Daniil Gentili <daniil@daniil.it>
+ * @license   https://opensource.org/licenses/AGPL-3.0 AGPLv3
+ *
+ * @link https://docs.madelineproto.xyz MadelineProto documentation
+ */
 
 namespace danog\MadelineProto;
 
+use Amp\ByteStream\ClosedException;
+use Amp\Deferred;
+use Amp\Promise;
+use danog\MadelineProto\Loop\Connection\CheckLoop;
+use danog\MadelineProto\Loop\Connection\HttpWaitLoop;
+use danog\MadelineProto\Loop\Connection\PingLoop;
+use danog\MadelineProto\Loop\Connection\ReadLoop;
+use danog\MadelineProto\Loop\Connection\WriteLoop;
+use danog\MadelineProto\MTProtoSession\Session;
+use danog\MadelineProto\Stream\ConnectionContext;
+use danog\MadelineProto\Stream\MTProtoTransport\HttpsStream;
+use danog\MadelineProto\Stream\MTProtoTransport\HttpStream;
+use danog\MadelineProto\Stream\Transport\WssStream;
+use danog\MadelineProto\Stream\Transport\WsStream;
+
 /**
- * Manages connection to telegram servers.
+ * Connection class.
+ *
+ * Manages connection to Telegram datacenters
+ *
+ * @author Daniil Gentili <daniil@daniil.it>
  */
-class Connection
+class Connection extends Session
 {
     use \danog\Serializable;
-    use \danog\MadelineProto\Tools;
-    const API_ENDPOINT = 0;
-    const VOIP_UDP_REFLECTOR_ENDPOINT = 1;
-    const VOIP_TCP_REFLECTOR_ENDPOINT = 2;
-    const VOIP_UDP_P2P_ENDPOINT = 3;
-    const VOIP_UDP_LAN_ENDPOINT = 4;
+    use Tools;
 
-    public $sock = null;
-    public $protocol = null;
-    public $ip = null;
-    public $port = null;
-    public $timeout = null;
-    public $parsed = [];
-    public $time_delta = 0;
-    public $type = 0;
-    public $peer_tag;
-    public $temp_auth_key;
-    public $auth_key;
-    public $session_id;
-    public $session_out_seq_no = 0;
-    public $session_in_seq_no = 0;
-    public $ipv6 = false;
-    public $incoming_messages = [];
-    public $outgoing_messages = [];
-    public $new_incoming = [];
-    public $new_outgoing = [];
-    public $max_incoming_id;
-    public $max_outgoing_id;
-    public $proxy = '\\Socket';
-    public $extra = [];
-    public $obfuscated = [];
-    public $authorized = false;
-    public $call_queue = [];
-    public $object_queue = [];
-    public $ack_queue = [];
-    public $i = [];
-    public $must_open = true;
-    public $last_recv = 0;
+    /**
+     * Writer loop.
+     *
+     * @var \danog\MadelineProto\Loop\Connection\WriteLoop
+     */
+    protected $writer;
+    /**
+     * Reader loop.
+     *
+     * @var \danog\MadelineProto\Loop\Connection\ReadLoop
+     */
+    protected $reader;
+    /**
+     * Checker loop.
+     *
+     * @var \danog\MadelineProto\Loop\Connection\CheckLoop
+     */
+    protected $checker;
+    /**
+     * Waiter loop.
+     *
+     * @var \danog\MadelineProto\Loop\Connection\HttpWaitLoop
+     */
+    protected $waiter;
+    /**
+     * Ping loop.
+     *
+     * @var \danog\MadelineProto\Loop\Connection\PingLoop
+     */
+    protected $pinger;
+    /**
+     * The actual socket.
+     *
+     * @var Stream
+     */
+    public $stream;
+    /**
+     * Connection context.
+     *
+     * @var ConnectionContext
+     */
+    private $ctx;
 
-    public function __magic_construct($proxy, $extra, $ip, $port, $protocol, $timeout, $ipv6)
+    /**
+     * HTTP request count.
+     *
+     * @var integer
+     */
+    private $httpReqCount = 0;
+    /**
+     * HTTP response count.
+     *
+     * @var integer
+     */
+    private $httpResCount = 0;
+
+    /**
+     * Date of last chunk received.
+     *
+     * @var integer
+     */
+    private $lastChunk = 0;
+
+    /**
+     * Logger instance.
+     *
+     * @var Logger
+     */
+    protected $logger;
+    /**
+     * Main instance.
+     *
+     * @var MTProto
+     */
+    protected $API;
+    /**
+     * Shared connection instance.
+     *
+     * @var DataCenterConnection
+     */
+    protected $shared;
+
+    /**
+     * DC ID.
+     *
+     * @var string
+     */
+    protected $datacenter;
+
+    /**
+     * Connection ID.
+     *
+     * @var int
+     */
+    private $id = 0;
+
+    /**
+     * DC ID and connection ID concatenated.
+     *
+     * @var
+     */
+    private $datacenterId = '';
+
+    /**
+     * Whether this socket has to be reconnected.
+     *
+     * @var boolean
+     */
+    private $needsReconnect = false;
+    /**
+     * Indicate if this socket needs to be reconnected.
+     *
+     * @param boolean $needsReconnect Whether the socket has to be reconnected
+     *
+     * @return void
+     */
+    public function needReconnect(bool $needsReconnect)
     {
-        // Can use:
-        /*
-        - tcp_full
-        - tcp_abridged
-        - tcp_intermediate
-        - http
-        - https
-        - udp
-        */
-        if ($proxy === '\\MTProxySocket') {
-            $proxy = '\\Socket';
-            $protocol = 'obfuscated2';
+        $this->needsReconnect = $needsReconnect;
+    }
+    /**
+     * Whether this sockets needs to be reconnected.
+     *
+     * @return boolean
+     */
+    public function shouldReconnect(): bool
+    {
+        return $this->needsReconnect;
+    }
+    /**
+     * Check if the socket is writing stuff.
+     *
+     * @return boolean
+     */
+    public function isWriting(): bool
+    {
+        return $this->writing;
+    }
+    /**
+     * Check if the socket is reading stuff.
+     *
+     * @return boolean
+     */
+    public function isReading(): bool
+    {
+        return $this->reading;
+    }
+    /**
+     * Set writing boolean.
+     *
+     * @param boolean $writing
+     *
+     * @return void
+     */
+    public function writing(bool $writing)
+    {
+        $this->shared->writing($writing, $this->id);
+    }
+    /**
+     * Set reading boolean.
+     *
+     * @param boolean $reading
+     *
+     * @return void
+     */
+    public function reading(bool $reading)
+    {
+        $this->shared->reading($reading, $this->id);
+    }
+
+    /**
+     * Tell the class that we have read a chunk of data from the socket.
+     *
+     * @return void
+     */
+    public function haveRead()
+    {
+        $this->lastChunk = \microtime(true);
+    }
+    /**
+     * Get the receive date of the latest chunk of data from the socket.
+     *
+     * @return int
+     */
+    public function getLastChunk(): int
+    {
+        return $this->lastChunk;
+    }
+
+    /**
+     * Indicate a received HTTP response.
+     *
+     * @return void
+     */
+    public function httpReceived()
+    {
+        $this->httpResCount++;
+    }
+    /**
+     * Count received HTTP responses.
+     *
+     * @return integer
+     */
+    public function countHttpReceived(): int
+    {
+        return $this->httpResCount;
+    }
+    /**
+     * Indicate a sent HTTP request.
+     *
+     * @return void
+     */
+    public function httpSent()
+    {
+        $this->httpReqCount++;
+    }
+    /**
+     * Count sent HTTP requests.
+     *
+     * @return integer
+     */
+    public function countHttpSent(): int
+    {
+        return $this->httpReqCount;
+    }
+
+    /**
+     * Get connection ID.
+     *
+     * @return integer
+     */
+    public function getID(): int
+    {
+        return $this->id;
+    }
+
+    /**
+     * Get datacenter concatenated with connection ID.
+     *
+     * @return string
+     */
+    public function getDatacenterID(): string
+    {
+        return $this->datacenterId;
+    }
+
+    /**
+     * Get connection context.
+     *
+     * @return ConnectionContext
+     */
+    public function getCtx(): ConnectionContext
+    {
+        return $this->ctx;
+    }
+
+    /**
+     * Check if is an HTTP connection.
+     *
+     * @return boolean
+     */
+    public function isHttp(): bool
+    {
+        return \in_array($this->ctx->getStreamName(), [HttpStream::getName(), HttpsStream::getName()]);
+    }
+
+    /**
+     * Check if is a media connection.
+     *
+     * @return boolean
+     */
+    public function isMedia(): bool
+    {
+        return $this->ctx->isMedia();
+    }
+
+    /**
+     * Check if is a CDN connection.
+     *
+     * @return boolean
+     */
+    public function isCDN(): bool
+    {
+        return $this->ctx->isCDN();
+    }
+
+    /**
+     * Connects to a telegram DC using the specified protocol, proxy and connection parameters.
+     *
+     * @param ConnectionContext $ctx Connection context
+     *
+     * @return \Amp\Promise
+     */
+    public function connect(ConnectionContext $ctx): \Generator
+    {
+        $this->ctx = $ctx->getCtx();
+        $this->datacenter = $ctx->getDc();
+        $this->datacenterId = $this->datacenter.'.'.$this->id;
+        $this->API->logger->logger("Connecting to DC {$this->datacenterId}", \danog\MadelineProto\Logger::WARNING);
+
+        $ctx->setReadCallback([$this, 'haveRead']);
+        $this->stream = yield $ctx->getStream();
+
+        if ($this->needsReconnect) {
+            $this->needsReconnect = false;
+        }
+        $this->httpReqCount = 0;
+        $this->httpResCount = 0;
+
+        if (!isset($this->writer)) {
+            $this->writer = new WriteLoop($this);
+        }
+        if (!isset($this->reader)) {
+            $this->reader = new ReadLoop($this);
+        }
+        if (!isset($this->checker)) {
+            $this->checker = new CheckLoop($this);
+        }
+        if (!isset($this->waiter)) {
+            $this->waiter = new HttpWaitLoop($this);
+        }
+        if (!isset($this->pinger) && ($this->ctx->hasStreamName(WssStream::getName()) || $this->ctx->hasStreamName(WsStream::getName()))) {
+            $this->pinger = new PingLoop($this);
+        }
+        foreach ($this->new_outgoing as $message_id) {
+            if ($this->outgoing_messages[$message_id]['unencrypted']) {
+                $promise = $this->outgoing_messages[$message_id]['promise'];
+                \Amp\Loop::defer(function () use ($promise) {
+                    $promise->fail(new Exception('Restart because we were reconnected'));
+                });
+                unset($this->new_outgoing[$message_id], $this->outgoing_messages[$message_id]);
+            }
         }
 
-        $this->protocol = $protocol;
-        $this->timeout = $timeout;
-        $this->ipv6 = $ipv6;
-        $this->ip = $ip;
-        $this->port = $port;
-        $this->proxy = $proxy;
-        $this->extra = $extra;
-        if (($has_proxy = !in_array($proxy, ['\\MTProxySocket', '\\Socket'])) && !isset(class_implements($proxy)['danog\\MadelineProto\\Proxy'])) {
-            throw new \danog\MadelineProto\Exception(\danog\MadelineProto\Lang::$current_lang['proxy_class_invalid']);
+        $this->writer->start();
+        $this->reader->start();
+        if (!$this->checker->start()) {
+            $this->checker->resume();
         }
-        switch ($this->protocol) {
-            case 'tcp_abridged':
-                $this->sock = new $proxy($ipv6 ? \AF_INET6 : \AF_INET, \SOCK_STREAM, getprotobyname('tcp'));
-                if ($has_proxy && $this->extra !== []) {
-                    $this->sock->setExtra($this->extra);
-                }
-                $this->sock->setOption(\SOL_SOCKET, \SO_RCVTIMEO, $timeout);
-                $this->sock->setOption(\SOL_SOCKET, \SO_SNDTIMEO, $timeout);
-                if (!$this->sock->connect($ip, $port)) {
-                    throw new Exception(\danog\MadelineProto\Lang::$current_lang['socket_con_error']);
-                }
-                $this->sock->setBlocking(true);
-                $this->write(chr(239));
-                break;
-            case 'tcp_intermediate':
-                $this->sock = new $proxy($ipv6 ? \AF_INET6 : \AF_INET, \SOCK_STREAM, getprotobyname('tcp'));
-                if ($has_proxy && $this->extra !== []) {
-                    $this->sock->setExtra($this->extra);
-                }
-                $this->sock->setOption(\SOL_SOCKET, \SO_RCVTIMEO, $timeout);
-                $this->sock->setOption(\SOL_SOCKET, \SO_SNDTIMEO, $timeout);
-                if (!$this->sock->connect($ip, $port)) {
-                    throw new Exception(\danog\MadelineProto\Lang::$current_lang['socket_con_error']);
-                }
-                $this->sock->setBlocking(true);
-                $this->write(str_repeat(chr(238), 4));
-                break;
-            case 'tcp_full':
-                $this->sock = new $proxy($ipv6 ? \AF_INET6 : \AF_INET, \SOCK_STREAM, getprotobyname('tcp'));
-                if ($has_proxy && $this->extra !== []) {
-                    $this->sock->setExtra($this->extra);
-                }
-                $this->sock->setOption(\SOL_SOCKET, \SO_RCVTIMEO, $timeout);
-                $this->sock->setOption(\SOL_SOCKET, \SO_SNDTIMEO, $timeout);
-                if (!$this->sock->connect($ip, $port)) {
-                    throw new Exception(\danog\MadelineProto\Lang::$current_lang['socket_con_error']);
-                }
-                $this->sock->setBlocking(true);
-                $this->out_seq_no = -1;
-                $this->in_seq_no = -1;
-                break;
-            case 'obfuscated2':
-                $this->sock = new $proxy($ipv6 ? \AF_INET6 : \AF_INET, \SOCK_STREAM, getprotobyname('tcp'));
-                if ($has_proxy && $this->extra !== []) {
-                    $this->sock->setExtra($this->extra);
-                }
-                $this->sock->setOption(\SOL_SOCKET, \SO_RCVTIMEO, $timeout);
-                $this->sock->setOption(\SOL_SOCKET, \SO_SNDTIMEO, $timeout);
-                if (!$this->sock->connect($ip, $port)) {
-                    throw new Exception(\danog\MadelineProto\Lang::$current_lang['socket_con_error']);
-                }
-                $this->sock->setBlocking(true);
-                do {
-                    $random = $this->random(64);
-                } while (in_array(substr($random, 0, 4), ['PVrG', 'GET ', 'POST', 'HEAD', str_repeat(chr(238), 4)]) || $random[0] === chr(0xef) || substr($random, 4, 4) === "\0\0\0\0");
-                $random[56] = $random[57] = $random[58] = $random[59] = chr(0xef);
-
-                $reversed = strrev(substr($random, 8, 48));
-                $this->obfuscated = ['encryption' => new \phpseclib\Crypt\AES('ctr'), 'decryption' => new \phpseclib\Crypt\AES('ctr')];
-                $this->obfuscated['encryption']->enableContinuousBuffer();
-                $this->obfuscated['decryption']->enableContinuousBuffer();
-                $this->obfuscated['encryption']->setKey(substr($random, 8, 32));
-                $this->obfuscated['encryption']->setIV(substr($random, 40, 16));
-                $this->obfuscated['decryption']->setKey(substr($reversed, 0, 32));
-                $this->obfuscated['decryption']->setIV(substr($reversed, 32, 16));
-                $random = substr_replace($random, substr(@$this->obfuscated['encryption']->encrypt($random), 56, 8), 56, 8);
-                $wrote = 0;
-                if (($wrote += $this->sock->write($random)) !== 64) {
-                    while (($wrote += $this->sock->write(substr($what, $wrote))) !== 64) {
-                    }
-                }
-                break;
-            case 'http':
-            case 'https':
-                $this->parsed = parse_url($ip);
-                if ($this->parsed['host'][0] === '[') {
-                    $this->parsed['host'] = substr($this->parsed['host'], 1, -1);
-                }
-                if (strpos($this->protocol, 'https') === 0 && $proxy === '\\Socket') {
-                    $proxy = '\\FSocket';
-                }
-                $this->sock = new $proxy($ipv6 ? \AF_INET6 : \AF_INET, \SOCK_STREAM, strpos($this->protocol, 'https') === 0 ? PHP_INT_MAX : getprotobyname('tcp'));
-                if ($has_proxy) {
-                    if ($this->extra !== []) {
-                        $this->sock->setExtra($this->extra);
-                    }/*
-                    if ($this->protocol === 'http') {
-                        $this->parsed['path'] = $this->parsed['scheme'].'://'.$this->parsed['host'].
-                        $this->parsed['path'];
-                        $port = 80;
-                    } elseif ($this->protocol === 'https') {
-                        $port = 443;
-                    }*/
-                }
-                $this->sock->setOption(\SOL_SOCKET, \SO_RCVTIMEO, $timeout);
-                $this->sock->setOption(\SOL_SOCKET, \SO_SNDTIMEO, $timeout);
-                if (!$this->sock->connect($this->parsed['host'], $port)) {
-                    throw new Exception(\danog\MadelineProto\Lang::$current_lang['socket_con_error']);
-                }
-                $this->sock->setBlocking(true);
-                break;
-            case 'udp':
-                throw new Exception(\danog\MadelineProto\Lang::$current_lang['protocol_not_implemented']);
-            default:
-                throw new Exception(\danog\MadelineProto\Lang::$current_lang['protocol_invalid']);
+        $this->waiter->start();
+        if ($this->pinger) {
+            $this->pinger->start();
         }
     }
 
-    public function __destruct()
+    /**
+     * Send an MTProto message.
+     *
+     * Structure of message array:
+     * [
+     *     // only in outgoing messages
+     *     'body' => deserialized body, (optional if container)
+     *     'serialized_body' => 'serialized body', (optional if container)
+     *     'contentRelated' => bool,
+     *     '_' => 'predicate',
+     *     'promise' => deferred promise that gets resolved when a response to the message is received (optional),
+     *     'send_promise' => deferred promise that gets resolved when the message is sent (optional),
+     *     'file' => bool (optional),
+     *     'type' => 'type' (optional),
+     *     'queue' => queue ID (optional),
+     *     'container' => [message ids] (optional),
+     *
+     *     // only in incoming messages
+     *     'content' => deserialized body,
+     *     'seq_no' => number (optional),
+     *     'from_container' => bool (optional),
+     *
+     *     // can be present in both
+     *     'response' => message id (optional),
+     *     'msg_id' => message id (optional),
+     *     'sent' => timestamp,
+     *     'tries' => number
+     * ]
+     *
+     * @param array   $message The message to send
+     * @param boolean $flush   Whether to flush the message right away
+     *
+     * @return \Generator
+     */
+    public function sendMessage(array $message, bool $flush = true): \Generator
     {
-        switch ($this->protocol) {
-            case 'tcp_abridged':
-            case 'tcp_intermediate':
-            case 'tcp_full':
-            case 'http':
-            case 'https':
-            case 'obfuscated2':
-                try {
-                    unset($this->sock);
-                } catch (\danog\MadelineProto\Exception $e) {
-                }
-                break;
-            case 'udp':
-                throw new Exception(\danog\MadelineProto\Lang::$current_lang['protocol_not_implemented']);
-            default:
-                throw new Exception(\danog\MadelineProto\Lang::$current_lang['protocol_invalid']);
+        $deferred = new Deferred();
+
+        if (!isset($message['serialized_body'])) {
+            $body = \is_object($message['body']) ? yield $message['body'] : $message['body'];
+
+            $refreshNext = isset($message['refreshNext']) && $message['refreshNext'];
+            //$refreshNext = true;
+
+            if ($refreshNext) {
+                $this->API->referenceDatabase->refreshNext(true);
+            }
+
+            if ($message['method']) {
+                $body = yield $this->API->getTL()->serializeMethod($message['_'], $body);
+            } else {
+                $body['_'] = $message['_'];
+                $body = yield $this->API->getTL()->serializeObject(['type' => ''], $body, $message['_']);
+            }
+            if ($refreshNext) {
+                $this->API->referenceDatabase->refreshNext(false);
+            }
+            $message['serialized_body'] = $body;
+            unset($body);
         }
+
+        $message['send_promise'] = $deferred;
+        $this->pending_outgoing[$this->pending_outgoing_key++] = $message;
+        if ($flush && isset($this->writer)) {
+            $this->writer->resume();
+        }
+
+        return $deferred->promise();
     }
 
-    public function close_and_reopen()
+    /**
+     * Flush pending packets.
+     *
+     * @return void
+     */
+    public function flush()
     {
-        $this->__destruct();
-        \danog\MadelineProto\Logger::log('Reopening...', \danog\MadelineProto\Logger::ULTRA_VERBOSE);
-        $this->must_open = true;
-    }
-
-    public function __sleep()
-    {
-        return ['proxy', 'extra', 'protocol', 'ip', 'port', 'timeout', 'parsed', 'time_delta', 'peer_tag', 'temp_auth_key', 'auth_key', 'session_id', 'session_out_seq_no', 'session_in_seq_no', 'ipv6', 'incoming_messages', 'outgoing_messages', 'new_incoming', 'new_outgoing', 'max_incoming_id', 'max_outgoing_id', 'obfuscated', 'authorized', 'object_queue', 'ack_queue'];
-    }
-
-    public function __wakeup()
-    {
-        $keys = array_keys((array) get_object_vars($this));
-        if (count($keys) !== count(array_unique($keys))) {
-            throw new Bug74586Exception();
-        }
-        $this->time_delta = 0;
-    }
-
-    public function write($what, $length = null)
-    {
-        if ($length !== null) {
-            $what = substr($what, 0, $length);
-        } else {
-            $length = strlen($what);
-        }
-        switch ($this->protocol) {
-            case 'obfuscated2':
-                $what = @$this->obfuscated['encryption']->encrypt($what);
-            case 'tcp_abridged':
-            case 'tcp_intermediate':
-            case 'tcp_full':
-            case 'http':
-            case 'https':
-                return $this->sock->write($what);
-            case 'udp':
-                throw new Exception(\danog\MadelineProto\Lang::$current_lang['protocol_not_implemented']);
-            default:
-                throw new Exception(\danog\MadelineProto\Lang::$current_lang['protocol_invalid']);
+        if (isset($this->writer)) {
+            $this->writer->resume();
         }
     }
-
-    public function read($length)
+    /**
+     * Resume HttpWaiter.
+     *
+     * @return void
+     */
+    public function pingHttpWaiter()
     {
-        //\danog\MadelineProto\Logger::log("Asked to read $length", \danog\MadelineProto\Logger::ULTRA_VERBOSE);
-        switch ($this->protocol) {
-            case 'obfuscated2':
-                return @$this->obfuscated['decryption']->encrypt($this->sock->read($length));
-            case 'tcp_abridged':
-            case 'tcp_intermediate':
-            case 'tcp_full':
-            case 'http':
-            case 'https':
-                return $this->sock->read($length);
-            case 'udp':
-                throw new Exception(\danog\MadelineProto\Lang::$current_lang['protocol_not_implemented']);
-            default:
-                throw new Exception(\danog\MadelineProto\Lang::$current_lang['protocol_invalid']);
+        if (isset($this->waiter)) {
+            $this->waiter->resume();
+        }
+        if (isset($this->pinger)) {
+            $this->pinger->resume();
         }
     }
-
-    public function read_message()
+    /**
+     * Connect main instance.
+     *
+     * @param DataCenterConnection $extra Shared instance
+     * @param int                  $id    Connection ID
+     *
+     * @return void
+     */
+    public function setExtra(DataCenterConnection $extra, int $id)
     {
-        switch ($this->protocol) {
-            case 'tcp_full':
-                $packet_length_data = $this->read(4);
-                $packet_length = unpack('V', $packet_length_data)[1];
-                $packet = $this->read($packet_length - 4);
-                if (strrev(hash('crc32b', $packet_length_data.substr($packet, 0, -4), true)) !== substr($packet, -4)) {
-                    throw new Exception('CRC32 was not correct!');
-                }
-                $this->in_seq_no++;
-                $in_seq_no = unpack('V', substr($packet, 0, 4))[1];
-                if ($in_seq_no != $this->in_seq_no) {
-                    throw new Exception('Incoming seq_no mismatch');
-                }
-
-                return substr($packet, 4, $packet_length - 12);
-            case 'tcp_intermediate':
-                return $this->read(unpack('V', $this->read(4))[1]);
-            case 'obfuscated2':
-            case 'tcp_abridged':
-                $packet_length = ord($this->read(1));
-
-                return $this->read($packet_length < 127 ? $packet_length << 2 : unpack('V', $this->read(3)."\0")[1] << 2);
-            case 'http':
-            case 'https':
-                $response = $this->read_http_payload();
-                if ($response['code'] !== 200) {
-                    Logger::log($response['body']);
-
-                    return $this->pack_signed_int(-$response['code']);
-                    //throw new Exception($response['description'], $response['code']);
-                }
-                $close = $response['protocol'] === 'HTTP/1.0';
-                if (isset($response['headers']['connection'])) {
-                    $close = strtolower($response['headers']['connection']) === 'close';
-                }
-                if ($close) {
-                    $this->close_and_reopen();
-                }
-
-                return $response['body'];
-            case 'udp':
-                throw new Exception(\danog\MadelineProto\Lang::$current_lang['protocol_not_implemented']);
-            default:
-                throw new Exception(\danog\MadelineProto\Lang::$current_lang['protocol_invalid']);
-        }
+        $this->shared = $extra;
+        $this->id = $id;
+        $this->API = $extra->getExtra();
+        $this->logger = $this->API->logger;
     }
 
-    public function send_message($message)
+    /**
+     * Get main instance.
+     *
+     * @return MTProto
+     */
+    public function getExtra(): MTProto
     {
-        $this->must_open = $this->must_open || $this->sock === null || $this->sock->getResource() === null;
-
-        if ($this->must_open) {
-            $this->__construct($this->proxy, $this->extra, $this->ip, $this->port, $this->protocol, $this->timeout, $this->ipv6);
-            $this->must_open = false;
-        }
-        switch ($this->protocol) {
-            case 'tcp_full':
-                $this->out_seq_no++;
-                $step1 = pack('VV', strlen($message) + 12, $this->out_seq_no).$message;
-                $step2 = $step1.strrev(hash('crc32b', $step1, true));
-                $this->write($step2);
-                break;
-            case 'tcp_intermediate':
-                $this->write(pack('V', strlen($message)).$message);
-                break;
-            case 'obfuscated2':
-            case 'tcp_abridged':
-                $len = strlen($message) / 4;
-                if ($len < 127) {
-                    $message = chr($len).$message;
-                } else {
-                    $message = chr(127).substr(pack('V', $len), 0, 3).$message;
-                }
-                $this->write($message);
-                break;
-            case 'http':
-            case 'https':
-                $this->write('POST '.$this->parsed['path']." HTTP/1.1\r\nHost: ".$this->parsed['host'].':'.$this->port."\r\n".$this->sock->getProxyHeaders()."Content-Type: application/x-www-form-urlencoded\r\nConnection: keep-alive\r\nKeep-Alive: timeout=100000, max=10000000\r\nContent-Length: ".strlen($message)."\r\n\r\n".$message);
-                break;
-            case 'udp':
-                throw new Exception(\danog\MadelineProto\Lang::$current_lang['protocol_not_implemented']);
-            default:
-                throw new Exception(\danog\MadelineProto\Lang::$current_lang['protocol_invalid']);
-        }
+        return $this->API;
     }
 
-    public function read_http_line()
+    /**
+     * Get shared connection instance.
+     *
+     * @return DataCenterConnection
+     */
+    public function getShared(): DataCenterConnection
     {
-        $line = $lastchar = $curchar = '';
-        while ($lastchar.$curchar !== "\r\n") {
-            $line .= $lastchar;
-            $lastchar = $curchar;
-            $curchar = $this->sock->read(1);
-        }
-
-        return $line;
+        return $this->shared;
     }
 
-    public function read_http_payload()
+    /**
+     * Disconnect from DC.
+     *
+     * @param bool $temporary Whether the disconnection is temporary, triggered by the reconnect method
+     *
+     * @return void
+     */
+    public function disconnect(bool $temporary = false)
     {
-        list($protocol, $code, $description) = explode(' ', $this->read_http_line(), 3);
-        list($protocol, $protocol_version) = explode('/', $protocol);
-        if ($protocol !== 'HTTP') {
-            throw new \danog\MadelineProto\Exception('Wrong protocol');
+        $this->API->logger->logger("Disconnecting from DC {$this->datacenterId}");
+        $this->needsReconnect = true;
+        foreach (['reader', 'writer', 'checker', 'waiter', 'updater', 'pinger'] as $loop) {
+            if (isset($this->{$loop}) && $this->{$loop}) {
+                $this->{$loop}->signal($loop === 'reader' ? new NothingInTheSocketException() : true);
+            }
         }
-        $code = (int) $code;
-        $headers = [];
-        while (strlen($current_header = $this->read_http_line())) {
-            $current_header = explode(':', $current_header, 2);
-            $headers[strtolower($current_header[0])] = trim($current_header[1]);
+        if ($this->stream) {
+            try {
+                $this->stream->disconnect();
+            } catch (ClosedException $e) {
+                $this->API->logger->logger($e);
+            }
         }
-
-        $read = '';
-        if (isset($headers['content-length'])) {
-            $read = $this->sock->read((int) $headers['content-length']);
-        }/* elseif (isset($headers['transfer-encoding']) && $headers['transfer-encoding'] === 'chunked') {
-            do {
-                $length = hexdec($this->read_http_line());
-                $read .= $this->sock->read($length);
-                $this->read_http_line();
-            } while ($length);
-        }*/
-
-        return ['protocol' => $protocol, 'protocol_version' => $protocol_version, 'code' => $code, 'description' => $description, 'body' => $read, 'headers' => $headers];
+        if (!$temporary) {
+            $this->shared->signalDisconnect($this->id);
+        }
+        $this->API->logger->logger("Disconnected from DC {$this->datacenterId}");
     }
 
-    public function getSocket()
+    /**
+     * Reconnect to DC.
+     *
+     * @return \Generator
+     */
+    public function reconnect(): \Generator
     {
-        return $this->sock;
+        $this->API->logger->logger("Reconnecting DC {$this->datacenterId}");
+        $this->disconnect(true);
+        yield $this->API->datacenter->dcConnect($this->ctx->getDc(), $this->id);
+    }
+
+    /**
+     * Get name.
+     *
+     * @return string
+     */
+    public function getName(): string
+    {
+        return __CLASS__;
     }
 }

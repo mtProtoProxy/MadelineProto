@@ -1,15 +1,21 @@
 <?php
 
-/*
-Copyright 2016-2018 Daniil Gentili
-(https://daniil.it)
-This file is part of MadelineProto.
-MadelineProto is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
-The PWRTelegram API is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-See the GNU Affero General Public License for more details.
-You should have received a copy of the GNU General Public License along with MadelineProto.
-If not, see <http://www.gnu.org/licenses/>.
-*/
+/**
+ * Server module.
+ *
+ * This file is part of MadelineProto.
+ * MadelineProto is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+ * MadelineProto is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU Affero General Public License for more details.
+ * You should have received a copy of the GNU General Public License along with MadelineProto.
+ * If not, see <http://www.gnu.org/licenses/>.
+ *
+ * @author    Daniil Gentili <daniil@daniil.it>
+ * @copyright 2016-2019 Daniil Gentili <daniil@daniil.it>
+ * @license   https://opensource.org/licenses/AGPL-3.0 AGPLv3
+ *
+ * @link https://docs.madelineproto.xyz MadelineProto documentation
+ */
 
 namespace danog\MadelineProto;
 
@@ -24,25 +30,25 @@ class Server
 
     public function __construct($settings)
     {
-        set_error_handler(['\\danog\\MadelineProto\\Exception', 'ExceptionErrorHandler']);
+        \set_error_handler(['\\danog\\MadelineProto\\Exception', 'ExceptionErrorHandler']);
         \danog\MadelineProto\Logger::constructor(3);
 
-        if (!extension_loaded('sockets')) {
+        if (!\extension_loaded('sockets')) {
             throw new Exception(['extension', 'sockets']);
         }
 
-        if (!extension_loaded('pcntl')) {
+        if (!\extension_loaded('pcntl')) {
             throw new Exception(['extension', 'pcntl']);
         }
         $this->settings = $settings;
-        $this->mypid = getmypid();
+        $this->mypid = \getmypid();
     }
 
     public function start()
     {
-        pcntl_signal(SIGTERM, [$this, 'sig_handler']);
-        pcntl_signal(SIGINT, [$this, 'sig_handler']);
-        pcntl_signal(SIGCHLD, [$this, 'sig_handler']);
+        \pcntl_signal(SIGTERM, [$this, 'sigHandler']);
+        \pcntl_signal(SIGINT, [$this, 'sigHandler']);
+        \pcntl_signal(SIGCHLD, [$this, 'sigHandler']);
 
         $this->sock = new \Socket($this->settings['type'], SOCK_STREAM, $this->settings['protocol']);
         $this->sock->bind($this->settings['address'], $this->settings['port']);
@@ -54,7 +60,7 @@ class Server
         $this->sock->setOption(\SOL_SOCKET, \SO_SNDTIMEO, $timeout);
         \danog\MadelineProto\Logger::log('Server started! Listening on '.$this->settings['address'].':'.$this->settings['port']);
         while (true) {
-            pcntl_signal_dispatch();
+            \pcntl_signal_dispatch();
 
             try {
                 if ($sock = $this->sock->accept()) {
@@ -67,7 +73,7 @@ class Server
 
     private function handle($socket)
     {
-        $pid = pcntl_fork();
+        $pid = \pcntl_fork();
         if ($pid == -1) {
             die('could not fork');
         } elseif ($pid) {
@@ -80,12 +86,12 @@ class Server
 
     public function __destruct()
     {
-        if ($this->mypid === getmypid()) {
+        if ($this->mypid === \getmypid()) {
             \danog\MadelineProto\Logger::log('Shutting main process '.$this->mypid.' down');
             unset($this->sock);
             foreach ($this->pids as $pid) {
                 \danog\MadelineProto\Logger::log("Waiting for $pid");
-                pcntl_wait($pid);
+                \pcntl_wait($pid);
             }
             \danog\MadelineProto\Logger::log('Done, closing main process');
 
@@ -93,7 +99,7 @@ class Server
         }
     }
 
-    public function sig_handler($sig)
+    public function sigHandler($sig)
     {
         switch ($sig) {
             case SIGTERM:
@@ -101,7 +107,7 @@ class Server
                 exit();
 
             case SIGCHLD:
-                pcntl_waitpid(-1, $status);
+                \pcntl_waitpid(-1, $status);
                 break;
         }
     }

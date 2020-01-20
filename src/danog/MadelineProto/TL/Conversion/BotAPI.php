@@ -1,31 +1,46 @@
 <?php
 
-/*
-Copyright 2016-2018 Daniil Gentili
-(https://daniil.it)
-This file is part of MadelineProto.
-MadelineProto is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
-MadelineProto is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-See the GNU Affero General Public License for more details.
-You should have received a copy of the GNU General Public License along with MadelineProto.
-If not, see <http://www.gnu.org/licenses/>.
-*/
+/**
+ * BotAPI module.
+ *
+ * This file is part of MadelineProto.
+ * MadelineProto is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
+ * MadelineProto is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU Affero General Public License for more details.
+ * You should have received a copy of the GNU General Public License along with MadelineProto.
+ * If not, see <http://www.gnu.org/licenses/>.
+ *
+ * @author    Daniil Gentili <daniil@daniil.it>
+ * @copyright 2016-2019 Daniil Gentili <daniil@daniil.it>
+ * @license   https://opensource.org/licenses/AGPL-3.0 AGPLv3
+ *
+ * @link https://docs.madelineproto.xyz MadelineProto documentation
+ */
 
 namespace danog\MadelineProto\TL\Conversion;
 
+use danog\MadelineProto\Logger;
+
 trait BotAPI
 {
-    public function html_entity_decode($stuff)
+    private function htmlEntityDecode(string $stuff): string
     {
-        return html_entity_decode(preg_replace('#< *br */? *>#', "\n", $stuff));
+        return \html_entity_decode(\preg_replace('#< *br */? *>#', "\n", $stuff));
     }
 
-    public function mb_strlen($text)
+    /**
+     * Get Telegram UTF-8 length of string.
+     *
+     * @param string $text Text
+     *
+     * @return int
+     */
+    public static function mbStrlen(string $text): int
     {
         $length = 0;
-        $textlength = strlen($text);
+        $textlength = \strlen($text);
         for ($x = 0; $x < $textlength; $x++) {
-            $char = ord($text[$x]);
+            $char = \ord($text[$x]);
             if (($char & 0xC0) != 0x80) {
                 $length += 1 + ($char >= 0xf0);
             }
@@ -34,7 +49,68 @@ trait BotAPI
         return $length;
     }
 
-    public function parse_buttons($rows)
+    /**
+     * Telegram UTF-8 multibyte substring.
+     *
+     * @param string  $text   Text to substring
+     * @param integer $offset Offset
+     * @param ?int    $length Length
+     *
+     * @return string
+     */
+    public static function mbSubstr(string $text, int $offset, $length = null): string
+    {
+        $mb_text_length = self::mbStrlen($text);
+        if ($offset < 0) {
+            $offset = $mb_text_length + $offset;
+        }
+        if ($length < 0) {
+            $length = ($mb_text_length - $offset) + $length;
+        } elseif ($length === null) {
+            $length = $mb_text_length - $offset;
+        }
+        $new_text = '';
+        $current_offset = 0;
+        $current_length = 0;
+        $text_length = \strlen($text);
+        for ($x = 0; $x < $text_length; $x++) {
+            $char = \ord($text[$x]);
+            if (($char & 0xC0) != 0x80) {
+                $current_offset += 1 + ($char >= 0xf0);
+                if ($current_offset > $offset) {
+                    $current_length += 1 + ($char >= 0xf0);
+                }
+            }
+            if ($current_offset > $offset) {
+                if ($current_length <= $length) {
+                    $new_text .= $text[$x];
+                }
+            }
+        }
+
+        return $new_text;
+    }
+
+    /**
+     * Telegram UTF-8 multibyte split.
+     *
+     * @param string  $text   Text
+     * @param integer $length Length
+     *
+     * @return array
+     */
+    public static function mbStrSplit(string $text, int $length): array
+    {
+        $tlength = \mb_strlen($text, 'UTF-8');
+        $result = [];
+        for ($x = 0; $x < $tlength; $x += $length) {
+            $result[] = \mb_substr($text, $x, $length, 'UTF-8');
+        }
+
+        return $result;
+    }
+
+    private function parseButtons($rows)
     {
         $newrows = [];
         $key = 0;
@@ -73,7 +149,7 @@ trait BotAPI
         return $newrows;
     }
 
-    public function parse_reply_markup($markup)
+    private function parseReplyMarkup($markup)
     {
         if (isset($markup['force_reply']) && $markup['force_reply']) {
             $markup['_'] = 'replyKeyboardForceReply';
@@ -93,24 +169,32 @@ trait BotAPI
                 $markup['single_use'] = $markup['one_time_keyboard'];
                 unset($markup['one_time_keyboard']);
             }
-            $markup['rows'] = $this->parse_buttons($markup['keyboard']);
+            $markup['rows'] = $this->parseButtons($markup['keyboard']);
             unset($markup['keyboard']);
         }
         if (isset($markup['inline_keyboard'])) {
             $markup['_'] = 'replyInlineMarkup';
-            $markup['rows'] = $this->parse_buttons($markup['inline_keyboard']);
+            $markup['rows'] = $this->parseButtons($markup['inline_keyboard']);
             unset($markup['inline_keyboard']);
         }
 
         return $markup;
     }
 
-    public function MTProto_to_botAPI($data, $sent_arguments = [])
+    /**
+     * Convert MTProto parameters to bot API parameters.
+     *
+     * @param array $data           Data
+     * @param array $sent_arguments Sent arguments
+     *
+     * @return \Generator<array>
+     */
+    public function MTProtoToBotAPI(array $data, array $sent_arguments = []): \Generator
     {
         $newd = [];
         if (!isset($data['_'])) {
             foreach ($data as $key => $element) {
-                $newd[$key] = $this->MTProto_to_botAPI($element, $sent_arguments);
+                $newd[$key] = yield $this->MTProtoToBotAPI($element, $sent_arguments);
             }
 
             return $newd;
@@ -121,20 +205,20 @@ trait BotAPI
                 $newd['date'] = $data['date'];
                 $newd['text'] = $sent_arguments['message'];
                 if ($data['out']) {
-                    $newd['from'] = $this->get_pwr_chat($this->authorization['user']);
+                    $newd['from'] = yield $this->getPwrChat($this->authorization['user']);
                 }
-                $newd['chat'] = $this->get_pwr_chat($sent_arguments['peer']);
+                $newd['chat'] = yield $this->getPwrChat($sent_arguments['peer']);
                 if (isset($data['entities'])) {
-                    $newd['entities'] = $this->MTProto_to_botAPI($data['entities'], $sent_arguments);
+                    $newd['entities'] = yield $this->MTProtoToBotAPI($data['entities'], $sent_arguments);
                 }
                 if (isset($data['media'])) {
-                    $newd = array_merge($newd, $this->MTProto_to_botAPI($data['media'], $sent_arguments));
+                    $newd = \array_merge($newd, yield $this->MTProtoToBotAPI($data['media'], $sent_arguments));
                 }
 
                 return $newd;
             case 'updateNewChannelMessage':
             case 'updateNewMessage':
-                return $this->MTProto_to_botAPI($data['message']);
+                return yield $this->MTProtoToBotAPI($data['message']);
             case 'message':
                 $newd['message_id'] = $data['id'];
                 $newd['date'] = $data['date'];
@@ -142,11 +226,11 @@ trait BotAPI
                 $newd['post'] = $data['post'];
                 $newd['silent'] = $data['silent'];
                 if (isset($data['from_id'])) {
-                    $newd['from'] = $this->get_pwr_chat($data['from_id']);
+                    $newd['from'] = yield $this->getPwrChat($data['from_id']);
                 }
-                $newd['chat'] = $this->get_pwr_chat($data['to_id']);
+                $newd['chat'] = yield $this->getPwrChat($data['to_id']);
                 if (isset($data['entities'])) {
-                    $newd['entities'] = $this->MTProto_to_botAPI($data['entities'], $sent_arguments);
+                    $newd['entities'] = yield $this->MTProtoToBotAPI($data['entities'], $sent_arguments);
                 }
                 if (isset($data['views'])) {
                     $newd['views'] = $data['views'];
@@ -155,13 +239,13 @@ trait BotAPI
                     $newd['edit_date'] = $data['edit_date'];
                 }
                 if (isset($data['via_bot_id'])) {
-                    $newd['via_bot'] = $this->get_pwr_chat($data['via_bot_id']);
+                    $newd['via_bot'] = yield $this->getPwrChat($data['via_bot_id']);
                 }
                 if (isset($data['fwd_from']['from_id'])) {
-                    $newd['froward_from'] = $this->get_pwr_chat($data['fwd_from']['from_id']);
+                    $newd['forward_from'] = yield $this->getPwrChat($data['fwd_from']['from_id']);
                 }
                 if (isset($data['fwd_from']['channel_id'])) {
-                    $newd['forward_from_chat'] = $this->get_pwr_chat($data['fwd_from']['channel_id']);
+                    $newd['forward_from_chat'] = yield $this->getPwrChat($data['fwd_from']['channel_id']);
                 }
                 if (isset($data['fwd_from']['date'])) {
                     $newd['forward_date'] = $data['fwd_from']['date'];
@@ -170,7 +254,7 @@ trait BotAPI
                     $newd['forward_from_message_id'] = $data['fwd_from']['channel_post'];
                 }
                 if (isset($data['media'])) {
-                    $newd = array_merge($newd, $this->MTProto_to_botAPI($data['media'], $sent_arguments));
+                    $newd = \array_merge($newd, yield $this->MTProtoToBotAPI($data['media'], $sent_arguments));
                 }
 
                 return $newd;
@@ -227,7 +311,7 @@ trait BotAPI
             case 'messageEntityMentionName':
                 unset($data['_']);
                 $data['type'] = 'text_mention';
-                $data['user'] = $this->get_pwr_chat($data['user_id']);
+                $data['user'] = yield $this->getPwrChat($data['user_id']);
                 unset($data['user_id']);
 
                 return $data;
@@ -237,7 +321,9 @@ trait BotAPI
                 }
                 $res['photo'] = [];
                 foreach ($data['photo']['sizes'] as $key => $photo) {
-                    $res['photo'][$key] = $this->photosize_to_botapi($photo, $data['photo']);
+                    if (\in_array($photo['_'], ['photoCachedSize', 'photoSize'])) {
+                        $res['photo'][$key] = yield $this->photosizeToBotAPI($photo, $data['photo']);
+                    }
                 }
 
                 return $res;
@@ -246,13 +332,13 @@ trait BotAPI
             case 'messageMediaDocument':
                 $type_name = 'document';
                 $res = [];
-                if ($data['document']['thumb']['_'] === 'photoSize') {
-                    $res['thumb'] = $this->photosize_to_botapi($data['document']['thumb'], [], true);
+                if (isset($data['document']['thumbs']) && $data['document']['thumbs'] && \in_array(\end($data['document']['thumbs'])['_'], ['photoCachedSize', 'photoSize'])) {
+                    $res['thumb'] = yield $this->photosizeToBotAPI(\end($data['document']['thumbs']), [], true);
                 }
                 foreach ($data['document']['attributes'] as $attribute) {
                     switch ($attribute['_']) {
                         case 'documentAttributeFilename':
-                            $pathinfo = pathinfo($attribute['file_name']);
+                            $pathinfo = \pathinfo($attribute['file_name']);
                             $res['ext'] = isset($pathinfo['extension']) ? '.'.$pathinfo['extension'] : '';
                             $res['file_name'] = $pathinfo['filename'];
                             break;
@@ -315,51 +401,85 @@ trait BotAPI
                     $res['file_name'] .= $res['ext'];
                     unset($res['ext']);
                 } else {
-                    $res['file_name'] .= $this->get_extension_from_mime($data['document']['mime_type']);
+                    $res['file_name'] .= $this->getExtensionFromMime($data['document']['mime_type']);
                 }
                 $data['document']['_'] = 'bot_'.$type_name;
                 $res['file_size'] = $data['document']['size'];
                 $res['mime_type'] = $data['document']['mime_type'];
-                $res['file_id'] = $this->base64url_encode($this->rle_encode($this->serialize_object(['type' => 'File'], $data['document'], 'File').chr(2)));
+                $res['file_id'] = \danog\MadelineProto\Tools::base64urlEncode(\danog\MadelineProto\Tools::rleEncode((yield $this->TL->serializeObject(['type' => 'File'], $data['document'], 'File')).\chr(2)));
 
                 return [$type_name => $res, 'caption' => isset($data['caption']) ? $data['caption'] : ''];
             default:
-                throw new Exception(sprintf(\danog\MadelineProto\Lang::$current_lang['botapi_conversion_error'], $data['_']));
+                throw new Exception(\sprintf(\danog\MadelineProto\Lang::$current_lang['botapi_conversion_error'], $data['_']));
         }
     }
 
-    public $botapi_params = ['disable_web_page_preview' => 'no_webpage', 'disable_notification' => 'silent', 'reply_to_message_id' => 'reply_to_msg_id', 'chat_id' => 'peer', 'text' => 'message'];
-
-    public function botAPI_to_MTProto($arguments)
+    /**
+     * Convert bot API parameters to MTProto parameters.
+     *
+     * @param array $arguments Arguments
+     *
+     * @return \Generator<array>
+     */
+    public function botAPIToMTProto(array $arguments): \Generator
     {
-        foreach ($this->botapi_params as $bot => $mtproto) {
+        foreach (self::BOTAPI_PARAMS_CONVERSION as $bot => $mtproto) {
             if (isset($arguments[$bot]) && !isset($arguments[$mtproto])) {
                 $arguments[$mtproto] = $arguments[$bot];
                 //unset($arguments[$bot]);
             }
         }
         if (isset($arguments['reply_markup'])) {
-            $arguments['reply_markup'] = $this->parse_reply_markup($arguments['reply_markup']);
+            $arguments['reply_markup'] = $this->parseReplyMarkup($arguments['reply_markup']);
         }
         if (isset($arguments['parse_mode'])) {
-            $arguments = $this->parse_mode($arguments);
+            $arguments = yield $this->parseMode($arguments);
         }
 
         return $arguments;
     }
 
-    public function parse_node($node, &$entities, &$new_message, &$offset)
+    private function parseNode($node, &$entities, &$new_message, &$offset)
     {
         switch ($node->nodeName) {
             case 'br':
                 $new_message .= "\n";
                 $offset++;
                 break;
+            case 's':
+            case 'strike':
+            case 'del':
+                $text = $this->htmlEntityDecode($node->textContent);
+
+                $length = $this->mbStrlen($text);
+                $entities[] = ['_' => 'messageEntityStrike', 'offset' => $offset, 'length' => $length];
+
+                $new_message .= $text;
+                $offset += $length;
+                break;
+            case 'u':
+                $text = $this->htmlEntityDecode($node->textContent);
+
+                $length = $this->mbStrlen($text);
+                $entities[] = ['_' => 'messageEntityUnderline', 'offset' => $offset, 'length' => $length];
+
+                $new_message .= $text;
+                $offset += $length;
+                break;
+            case 'blockquote':
+                $text = $this->htmlEntityDecode($node->textContent);
+
+                $length = $this->mbStrlen($text);
+                $entities[] = ['_' => 'messageEntityBlockquote', 'offset' => $offset, 'length' => $length];
+
+                $new_message .= $text;
+                $offset += $length;
+                break;
             case 'b':
             case 'strong':
-                $text = $this->html_entity_decode($node->textContent);
+                $text = $this->htmlEntityDecode($node->textContent);
 
-                $length = $this->mb_strlen($text);
+                $length = $this->mbStrlen($text);
                 $entities[] = ['_' => 'messageEntityBold', 'offset' => $offset, 'length' => $length];
 
                 $new_message .= $text;
@@ -367,27 +487,27 @@ trait BotAPI
                 break;
             case 'i':
             case 'em':
-                $text = $this->html_entity_decode($node->textContent);
+                $text = $this->htmlEntityDecode($node->textContent);
 
-                $length = $this->mb_strlen($text);
+                $length = $this->mbStrlen($text);
                 $entities[] = ['_' => 'messageEntityItalic', 'offset' => $offset, 'length' => $length];
 
                 $new_message .= $text;
                 $offset += $length;
                 break;
             case 'code':
-                $text = $this->html_entity_decode($node->textContent);
+                $text = $this->htmlEntityDecode($node->textContent);
 
-                $length = $this->mb_strlen($text);
+                $length = $this->mbStrlen($text);
                 $entities[] = ['_' => 'messageEntityCode', 'offset' => $offset, 'length' => $length];
 
                 $new_message .= $text;
                 $offset += $length;
                 break;
             case 'pre':
-                $text = $this->html_entity_decode($node->textContent);
+                $text = $this->htmlEntityDecode($node->textContent);
 
-                $length = $this->mb_strlen($text);
+                $length = $this->mbStrlen($text);
 
                 $language = $node->getAttribute('language');
                 if ($language === null) {
@@ -399,27 +519,27 @@ trait BotAPI
                 break;
             case 'p':
                 foreach ($node->childNodes as $node) {
-                    $this->parse_node($node, $entities, $new_message, $offset);
+                    yield $this->parseNode($node, $entities, $new_message, $offset);
                 }
                 break;
             case 'a':
-                $text = $this->html_entity_decode($node->textContent);
-                $length = $this->mb_strlen($text);
+                $text = $this->htmlEntityDecode($node->textContent);
+                $length = $this->mbStrlen($text);
                 $href = $node->getAttribute('href');
-                if (preg_match('|mention:(.*)|', $href, $matches) || preg_match('|tg://user\?id=(.*)|', $href, $matches)) {
-                    $mention = $this->get_info($matches[1]);
+                if (\preg_match('|mention:(.*)|', $href, $matches) || \preg_match('|tg://user\?id=(.*)|', $href, $matches)) {
+                    $mention = yield $this->getInfo($matches[1]);
                     if (!isset($mention['InputUser'])) {
                         throw new \danog\MadelineProto\Exception(\danog\MadelineProto\Lang::$current_lang['peer_not_in_db']);
                     }
                     $entities[] = ['_' => 'inputMessageEntityMentionName', 'offset' => $offset, 'length' => $length, 'user_id' => $mention['InputUser']];
-                } elseif (preg_match('|buttonurl:(.*)|', $href)) {
+                } elseif (\preg_match('|buttonurl:(.*)|', $href)) {
                     if (!isset($entities['buttons'])) {
                         $entities['buttons'] = [];
                     }
-                    if (strpos(substr($href, -4), '|:new|') !== false) {
-                        $entities['buttons'][] = ['_' => 'keyboardButtonUrl', 'text' => $text, 'url' => str_replace(['buttonurl:', ':new'], '', $href), 'new' => true];
+                    if (\strpos(\substr($href, -4), '|:new|') !== false) {
+                        $entities['buttons'][] = ['_' => 'keyboardButtonUrl', 'text' => $text, 'url' => \str_replace(['buttonurl:', ':new'], '', $href), 'new' => true];
                     } else {
-                        $entities['buttons'][] = ['_' => 'keyboardButtonUrl', 'text' => $text, 'url' => str_replace('buttonurl:', '', $href)];
+                        $entities['buttons'][] = ['_' => 'keyboardButtonUrl', 'text' => $text, 'url' => \str_replace('buttonurl:', '', $href)];
                     }
                     break;
                 } else {
@@ -429,44 +549,50 @@ trait BotAPI
                 $offset += $length;
                 break;
             default:
-                $text = $this->html_entity_decode($node->textContent);
-                $length = $this->mb_strlen($text);
+                $text = $this->htmlEntityDecode($node->textContent);
+                $length = $this->mbStrlen($text);
                 $new_message .= $text;
                 $offset += $length;
                 break;
         }
     }
-
-    public function parse_mode($arguments)
+    /**
+     * Convert markdown and HTML messages.
+     *
+     * @param array $arguments Arguments
+     *
+     * @internal
+     *
+     * @return \Generator<array>
+     */
+    public function parseMode(array $arguments): \Generator
     {
-        if ($arguments['message'] === '' || !isset($arguments['message']) || !isset($arguments['parse_mode'])) {
+        if (($arguments['message'] ?? '') === '' || !isset($arguments['parse_mode'])) {
             return $arguments;
         }
         if (isset($arguments['parse_mode']['_'])) {
-            $arguments['parse_mode'] = str_replace('textParseMode', '', $arguments['parse_mode']['_']);
+            $arguments['parse_mode'] = \str_replace('textParseMode', '', $arguments['parse_mode']['_']);
         }
-        if (stripos($arguments['parse_mode'], 'markdown') !== false) {
+        if (\stripos($arguments['parse_mode'], 'markdown') !== false) {
             $arguments['message'] = \Parsedown::instance()->line($arguments['message']);
             $arguments['parse_mode'] = 'HTML';
         }
-        if (stripos($arguments['parse_mode'], 'html') !== false) {
+        if (\stripos($arguments['parse_mode'], 'html') !== false) {
             $new_message = '';
 
-            $arguments['message'] = $this->html_fixtags($arguments['message']);
+            $arguments['message'] = \trim($this->htmlFixtags($arguments['message']));
+
             $dom = new \DOMDocument();
-            if (!extension_loaded('mbstring')) {
-                throw new Exception(['extension', 'mbstring']);
-            }
-            $dom->loadHTML(mb_convert_encoding($arguments['message'], 'HTML-ENTITIES', 'UTF-8'));
+            $dom->loadHTML(\mb_convert_encoding($arguments['message'], 'HTML-ENTITIES', 'UTF-8'));
             if (!isset($arguments['entities'])) {
                 $arguments['entities'] = [];
             }
             $offset = 0;
             foreach ($dom->getElementsByTagName('body')->item(0)->childNodes as $node) {
-                $this->parse_node($node, $arguments['entities'], $new_message, $offset);
+                yield $this->parseNode($node, $arguments['entities'], $new_message, $offset);
             }
             if (isset($arguments['entities']['buttons'])) {
-                $arguments['reply_markup'] = $this->build_rows($arguments['entities']['buttons']);
+                $arguments['reply_markup'] = $this->buildRows($arguments['entities']['buttons']);
                 unset($arguments['entities']['buttons']);
             }
             unset($arguments['parse_mode']);
@@ -476,30 +602,42 @@ trait BotAPI
         return $arguments;
     }
 
-    public function split_to_chunks($args)
+    /**
+     * Split too long message into chunks.
+     *
+     * @param array $args Arguments
+     *
+     * @internal
+     *
+     * @return \Generator
+     */
+    public function splitToChunks($args): \Generator
     {
-        $args = $this->parse_mode($args);
+        $args = yield $this->parseMode($args);
         if (!isset($args['entities'])) {
             $args['entities'] = [];
         }
 
-        $multiple_args_base = array_merge($args, ['entities' => [], 'parse_mode' => 'text', 'message' => '']);
-        $multiple_args = [$multiple_args_base];
+        $max_length = isset($args['media']) ? $this->config['caption_length_max'] : $this->config['message_length_max'];
+        $max_entity_length = 100;
+        $max_entity_size = 8110;
 
-        $max_length = $this->config['message_length_max'];
         $text_arr = [];
         foreach ($this->multipleExplodeKeepDelimiters(["\n"], $args['message']) as $word) {
-            if ($this->mb_strlen($word) > $max_length) {
-                foreach (str_split($word, $max_length) as $vv) {
+            if (\mb_strlen($word, 'UTF-8') > $max_length) {
+                foreach ($this->mbStrSplit($word, $max_length) as $vv) {
                     $text_arr[] = $vv;
                 }
             } else {
                 $text_arr[] = $word;
             }
         }
+
+        $multiple_args_base = \array_merge($args, ['entities' => [], 'parse_mode' => 'text', 'message' => '']);
+        $multiple_args = [$multiple_args_base];
         $i = 0;
         foreach ($text_arr as $word) {
-            if ($this->mb_strlen($multiple_args[$i]['message'].$word) <= $max_length) {
+            if ($this->mbStrlen($multiple_args[$i]['message'].$word) <= $max_length) {
                 $multiple_args[$i]['message'] .= $word;
             } else {
                 $i++;
@@ -510,44 +648,88 @@ trait BotAPI
 
         $i = 0;
         $offset = 0;
-        foreach ($args['entities'] as $entity) {
+        for ($k = 0; $k < \count($args['entities']); $k++) {
+            $entity = $args['entities'][$k];
             do {
-                while ($entity['offset'] > $offset + $this->mb_strlen($multiple_args[$i]['message'])) {
-                    $offset += $this->mb_strlen($multiple_args[$i]['message']);
+                while ($entity['offset'] > $offset + $this->mbStrlen($multiple_args[$i]['message'])) {
+                    $offset += $this->mbStrlen($multiple_args[$i]['message']);
                     $i++;
                 }
                 $entity['offset'] -= $offset;
-                if ($entity['offset'] + $entity['length'] > $this->mb_strlen($multiple_args[$i]['message'])) {
-                    $newentity = $entity;
-                    $newentity['length'] = $entity['length'] - ($this->mb_strlen($multiple_args[$i]['message']) - $entity['offset']);
-                    $entity['length'] = $this->mb_strlen($multiple_args[$i]['message']) - $entity['offset'];
-                    $multiple_args[$i]['entities'][] = $entity;
 
-                    $offset += $this->mb_strlen($multiple_args[$i]['message']);
+                if ($entity['offset'] + $entity['length'] > $this->mbStrlen($multiple_args[$i]['message'])) {
+                    $newentity = $entity;
+                    $newentity['length'] = $entity['length'] - ($this->mbStrlen($multiple_args[$i]['message']) - $entity['offset']);
+                    $entity['length'] = $this->mbStrlen($multiple_args[$i]['message']) - $entity['offset'];
+
+                    $offset += $entity['length']; //$this->mbStrlen($multiple_args[$i]['message']);
                     $newentity['offset'] = $offset;
+
+                    $prev_length = $this->mbStrlen($multiple_args[$i]['message']);
+                    $multiple_args[$i]['message'] = \rtrim($multiple_args[$i]['message']);
+                    $diff = $prev_length - $this->mbStrlen($multiple_args[$i]['message']);
+
+                    if ($diff) {
+                        $entity['length'] -= $diff;
+                        foreach ($args['entities'] as $key => &$eentity) {
+                            if ($key > $k) {
+                                $eentity['offset'] -= $diff;
+                            }
+                        }
+                    }
+
+                    $multiple_args[$i]['entities'][] = $entity;
                     $i++;
                     $entity = $newentity;
 
                     continue;
-                } else {
-                    $multiple_args[$i]['entities'][] = $entity;
-                    break;
                 }
+                $prev_length = $this->mbStrlen($multiple_args[$i]['message']);
+                $multiple_args[$i]['message'] = \rtrim($multiple_args[$i]['message']);
+                $diff = $prev_length - $this->mbStrlen($multiple_args[$i]['message']);
+                if ($diff) {
+                    $entity['length'] -= $diff;
+                    foreach ($args['entities'] as $key => &$eentity) {
+                        if ($key > $k) {
+                            $eentity['offset'] -= $diff;
+                        }
+                    }
+                }
+                $multiple_args[$i]['entities'][] = $entity;
+                break;
             } while (true);
+        }
+        $total = 0;
+        foreach ($multiple_args as $args) {
+            if (\count($args['entities']) > $max_entity_length) {
+                $total += \count($args['entities']) - $max_entity_length;
+            }
+            $c = 0;
+            foreach ($args['entities'] as $entity) {
+                if (isset($entity['url'])) {
+                    $c += \strlen($entity['url']);
+                }
+            }
+            if ($c >= $max_entity_size) {
+                $this->logger->logger('Entity size limit possibly exceeded, you may get an error indicating that the entities are too long. Reduce the number of entities and/or size of the URLs used.', Logger::FATAL_ERROR);
+            }
+        }
+        if ($total) {
+            $this->logger->logger("Too many entities, $total entities will be truncated", Logger::FATAL_ERROR);
         }
 
         return $multiple_args;
     }
 
-    public function multipleExplodeKeepDelimiters($delimiters, $string)
+    private function multipleExplodeKeepDelimiters($delimiters, $string)
     {
-        $initialArray = explode(chr(1), str_replace($delimiters, chr(1), $string));
+        $initialArray = \explode(\chr(1), \str_replace($delimiters, \chr(1), $string));
         $finalArray = [];
         $delimOffset = 0;
         foreach ($initialArray as $item) {
-            $delimOffset += $this->mb_strlen($item);
-            //if ($this->mb_strlen($item) > 0) {
-            $finalArray[] = $item.($delimOffset < $this->mb_strlen($string) ? $string[$delimOffset] : '');
+            $delimOffset += $this->mbStrlen($item);
+            //if ($this->mbStrlen($item) > 0) {
+            $finalArray[] = $item.($delimOffset < $this->mbStrlen($string) ? $string[$delimOffset] : '');
             //}
             $delimOffset++;
         }
@@ -555,32 +737,50 @@ trait BotAPI
         return $finalArray;
     }
 
-    public function html_fixtags($text)
+    private function htmlFixtags($text)
     {
-        preg_match_all('#(.*?)(<(a|b|strong|em|i|code|pre)[^>]*>)([^<]*?)(<\\/\\3>)(.*)?#is', $text, $matches, PREG_SET_ORDER);
+        $diff = 0;
+        \preg_match_all('#(.*?)(<(\bu\b|\bs\b|\ba\b|\bb\b|\bstrong\b|\bblockquote\b|\bstrike\b|\bdel\b|\bem\b|i|\bcode\b|\bpre\b)[^>]*>)(.*?)([<]\s*/\s*\3[>])#is', $text, $matches, PREG_SET_ORDER | PREG_OFFSET_CAPTURE);
         if ($matches) {
-            $last = count($matches) - 1;
-            foreach ($matches as $val) {
-                if (trim($val[1]) != '') {
-                    $text = str_replace($val[1], htmlentities($val[1]), $text);
+            foreach ($matches as $match) {
+                if (\trim($match[1][0]) != '') {
+                    $mod = \htmlentities($match[1][0]);
+
+                    $temp = \substr($text, 0, $match[1][1] + $diff);
+                    $temp .= $mod;
+                    $temp .= \substr($text, $match[1][1] + $diff + \strlen($match[1][0]));
+
+                    $diff += \strlen($mod) - \strlen($match[1][0]);
+
+                    $text = $temp;
                 }
-                $text = str_replace($val[4], htmlentities(trim($val[4])), $text);
-                if ($val == $matches[$last]) {
-                    $text = str_replace($val[6], $this->html_fixtags($val[6]), $text);
-                }
+                $mod = \htmlentities($match[4][0]);
+
+                $temp = \substr($text, 0, $match[4][1] + $diff);
+                $temp .= $mod;
+                $temp .= \substr($text, $match[4][1] + $diff + \strlen($match[4][0]));
+
+                $diff += \strlen($mod) - \strlen($match[4][0]);
+                $text = $temp;
             }
-            preg_match_all('#<a href="(.+?)">#is', $text, $matches);
-            foreach ($matches[1] as $match) {
-                $text = str_replace($match, htmlentities($match), $text);
+            $diff = 0;
+            \preg_match_all('#<a\s*href=("|\')(.+?)("|\')\s*>#is', $text, $matches, PREG_OFFSET_CAPTURE);
+            foreach ($matches[2] as $match) {
+                $mod = \htmlentities($match[0]);
+                $temp = \substr($text, 0, $match[1] + $diff);
+                $temp .= $mod;
+                $temp .= \substr($text, $match[1] + $diff + \strlen($match[0]));
+
+                $diff += \strlen($mod) - \strlen($match[0]);
+                $text = $temp;
             }
 
             return $text;
-        } else {
-            return htmlentities($text);
         }
+        return \htmlentities($text);
     }
 
-    public function build_rows($button_list)
+    private function buildRows($button_list)
     {
         $end = false;
         $rows = [];
@@ -588,7 +788,7 @@ trait BotAPI
         $cols = 0;
         foreach ($button_list as $button) {
             if (isset($button['new'])) {
-                if (count($buttons) == 0) {
+                if (\count($buttons) == 0) {
                     $buttons[] = $button;
                 } else {
                     $row = ['_' => 'keyboardButtonRow', 'buttons' => $buttons];
